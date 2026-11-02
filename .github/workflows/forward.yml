@@ -14,3 +14,5 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
           BALE_CHAT: ${{ secrets.BALE_CHAT }}
+          RUBIKA_TOKEN: ${{ secrets.RUBIKA_TOKEN }}
+          RUBIKA_CHAT: ${{ secrets.RUBIKA_CHAT }}
