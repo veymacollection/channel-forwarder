@@ -1,4 +1,4 @@
-import os, requests
+import os, json, requests
 
 TG = os.environ["TG_TOKEN"]
 BT = os.environ["BALE_TOKEN"]
@@ -11,45 +11,76 @@ rub = f"https://botapi.rubika.ir/v3/{RT}"
 KINDS = [("photo", "sendPhoto", "Image"), ("video", "sendVideo", "Video"),
          ("document", "sendDocument", "File"), ("audio", "sendAudio", "Music"),
          ("voice", "sendVoice", "Voice"), ("animation", "sendAnimation", "Gif")]
+MAP_FILE = "map.json"
 
-def bale_send(key, method, text, name, data):
+try:
+    with open(MAP_FILE) as f:
+        MAP = json.load(f)
+except Exception:
+    MAP = {}
+
+def bale_send(key, method, text, name, data, reply):
+    payload = {"chat_id": BC}
+    if reply:
+        payload["reply_to_message_id"] = reply
     if key is None:
-        r = requests.post(f"{bale}/sendMessage",
-                          json={"chat_id": BC, "text": text})
+        payload["text"] = text
+        r = requests.post(f"{bale}/sendMessage", json=payload)
     else:
-        r = requests.post(f"{bale}/{method}",
-                          data={"chat_id": BC, "caption": text},
+        payload["caption"] = text
+        r = requests.post(f"{bale}/{method}", data=payload,
                           files={key: (name, data)})
-    print("bale", r.status_code)
+    print("bale", r.status_code, r.text[:150])
+    j = r.json()
+    if not j.get("ok"):
+        raise Exception(j)
+    return j["result"]["message_id"]
 
-def rubika_send(rtype, text, name, data):
+def rubika_send(rtype, text, name, data, reply):
     if not (RT and RC):
-        return
+        return None
     if rtype is None:
-        r = requests.post(f"{rub}/sendMessage",
-                          json={"chat_id": RC, "text": text})
+        body = {"chat_id": RC, "text": text}
+        if reply:
+            body["reply_to_message_id"] = reply
+        r = requests.post(f"{rub}/sendMessage", json=body)
     else:
         u = requests.post(f"{rub}/requestSendFile",
                           json={"type": rtype}).json()
         up = requests.post(u["data"]["upload_url"],
                            files={"file": (name, data)}).json()
-        r = requests.post(f"{rub}/sendFile",
-                          json={"chat_id": RC,
-                                "file_id": up["data"]["file_id"],
-                                "text": text})
+        body = {"chat_id": RC, "file_id": up["data"]["file_id"],
+                "text": text}
+        if reply:
+            body["reply_to_message_id"] = reply
+        r = requests.post(f"{rub}/sendFile", json=body)
     print("rubika", r.status_code, r.text[:200])
+    j = r.json()
+    if j.get("status") != "OK":
+        raise Exception(j)
+    return j["data"].get("message_id")
 
 def run(fn, *a):
+    reply = a[-1]
     try:
-        fn(*a)
+        return fn(*a)
     except Exception as e:
         print(fn.__name__, "error:", e)
+        if reply:
+            try:
+                return fn(*a[:-1], None)
+            except Exception as e2:
+                print(fn.__name__, "retry error:", e2)
+    return None
 
 def handle(p):
     text = p.get("text") or p.get("caption") or ""
-    for key, method, rtype in KINDS:
-        if key in p:
-            obj = p[key][-1] if key == "photo" else p[key]
+    rt = p.get("reply_to_message")
+    prev = MAP.get(str(rt["message_id"]), {}) if rt else {}
+    name = data = key = method = rtype = None
+    for k, m, t in KINDS:
+        if k in p:
+            obj = p[k][-1] if k == "photo" else p[k]
             info = requests.get(f"{tg}/getFile",
                                 params={"file_id": obj["file_id"]}).json()
             if not info.get("ok"):
@@ -59,12 +90,14 @@ def handle(p):
             data = requests.get(
                 f"https://api.telegram.org/file/bot{TG}/{path}").content
             name = os.path.basename(path)
-            run(bale_send, key, method, text, name, data)
-            run(rubika_send, rtype, text, name, data)
-            return
-    if p.get("text"):
-        run(bale_send, None, None, text, None, None)
-        run(rubika_send, None, text, None, None)
+            key, method, rtype = k, m, t
+            break
+    if key is None and not p.get("text"):
+        print("unsupported type")
+        return
+    b = run(bale_send, key, method, text, name, data, prev.get("bale"))
+    r = run(rubika_send, rtype, text, name, data, prev.get("rubika"))
+    MAP[str(p["message_id"])] = {"bale": b, "rubika": r}
 
 if RT and not RC:
     try:
@@ -83,3 +116,7 @@ if ups:
     requests.get(f"{tg}/getUpdates",
                  params={"offset": ups[-1]["update_id"] + 1,
                          "allowed_updates": allowed})
+
+keys = list(MAP)[-500:]
+with open(MAP_FILE, "w") as f:
+    json.dump({k: MAP[k] for k in keys}, f)
