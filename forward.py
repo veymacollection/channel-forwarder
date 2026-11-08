@@ -100,6 +100,9 @@ def handle(p):
     r = run(rubika_send, rtype, text, name, data, prev.get("rubika"))
     MAP[str(p["message_id"])] = {"bale": b, "rubika": r}
 
+def needs_edit(p):
+    return bool(p.get("photo") or p.get("video"))
+
 if RT and not RC:
     try:
         print("RUBIKA UPDATES:",
@@ -127,7 +130,7 @@ pending = []
 for mid, p in latest.items():
     if mid in MAP:
         continue
-    if mid not in edited and now - p["date"] < MAX_WAIT:
+    if mid not in edited and needs_edit(p) and now - p["date"] < MAX_WAIT:
         pending.append(first_uid[mid])
         continue
     handle(p)
