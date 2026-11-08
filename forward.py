@@ -9,6 +9,21 @@ tg = f"https://api.telegram.org/bot{TG}"
 bale = f"https://tapi.bale.ai/bot{BT}"
 rub = f"https://botapi.rubika.ir/v3/{RT}"
 MAX_WAIT = 900  # حداکثر صبر (ثانیه) برای ویرایش پست‌یار
+
+# جایگزینی آیدی‌ها: سمت چپ آیدی تلگرام، سمت راست آیدی همون پیام‌رسان
+RUBIKA_REPLACE = {
+    "@vahid_abasiii": "@vahiid_abasii",
+    "@iman_tavakoli": "@iman_tavakolii",
+}
+BALE_REPLACE = {
+    "@iman_tavakoli": "@iman_tavakolii",
+}
+
+def fix(t, table):
+    for a, b in table.items():
+        t = t.replace(a, b)
+    return t
+
 KINDS = [("photo", "sendPhoto", "Image"), ("video", "sendVideo", "Video"),
          ("document", "sendDocument", "File"), ("audio", "sendAudio", "Music"),
          ("voice", "sendVoice", "Voice"), ("animation", "sendAnimation", "Gif")]
@@ -96,8 +111,10 @@ def handle(p):
     if key is None and not p.get("text"):
         print("unsupported type")
         return
-    b = run(bale_send, key, method, text, name, data, prev.get("bale"))
-    r = run(rubika_send, rtype, text, name, data, prev.get("rubika"))
+    b = run(bale_send, key, method, fix(text, BALE_REPLACE),
+            name, data, prev.get("bale"))
+    r = run(rubika_send, rtype, fix(text, RUBIKA_REPLACE),
+            name, data, prev.get("rubika"))
     MAP[str(p["message_id"])] = {"bale": b, "rubika": r}
 
 def needs_edit(p):
