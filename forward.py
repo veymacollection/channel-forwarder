@@ -1,4 +1,4 @@
-import os, json, requests
+import os, json, time, requests
 
 TG = os.environ["TG_TOKEN"]
 BT = os.environ["BALE_TOKEN"]
@@ -8,6 +8,7 @@ RC = os.environ.get("RUBIKA_CHAT", "")
 tg = f"https://api.telegram.org/bot{TG}"
 bale = f"https://tapi.bale.ai/bot{BT}"
 rub = f"https://botapi.rubika.ir/v3/{RT}"
+MAX_WAIT = 900  # حداکثر صبر (ثانیه) برای ویرایش پست‌یار
 KINDS = [("photo", "sendPhoto", "Image"), ("video", "sendVideo", "Video"),
          ("document", "sendDocument", "File"), ("audio", "sendAudio", "Music"),
          ("voice", "sendVoice", "Voice"), ("animation", "sendAnimation", "Gif")]
@@ -106,16 +107,35 @@ if RT and not RC:
     except Exception as e:
         print("rubika updates error:", e)
 
-allowed = '["channel_post"]'
+allowed = '["channel_post","edited_channel_post"]'
 ups = requests.get(f"{tg}/getUpdates",
                    params={"allowed_updates": allowed}).json().get("result", [])
+
+latest, first_uid, edited = {}, {}, set()
 for u in ups:
-    if u.get("channel_post"):
-        handle(u["channel_post"])
+    p = u.get("channel_post") or u.get("edited_channel_post")
+    if not p:
+        continue
+    mid = str(p["message_id"])
+    latest[mid] = p
+    if u.get("edited_channel_post"):
+        edited.add(mid)
+    first_uid.setdefault(mid, u["update_id"])
+
+now = time.time()
+pending = []
+for mid, p in latest.items():
+    if mid in MAP:
+        continue
+    if mid not in edited and now - p["date"] < MAX_WAIT:
+        pending.append(first_uid[mid])
+        continue
+    handle(p)
+
 if ups:
+    offset = min(pending) if pending else ups[-1]["update_id"] + 1
     requests.get(f"{tg}/getUpdates",
-                 params={"offset": ups[-1]["update_id"] + 1,
-                         "allowed_updates": allowed})
+                 params={"offset": offset, "allowed_updates": allowed})
 
 keys = list(MAP)[-500:]
 with open(MAP_FILE, "w") as f:
