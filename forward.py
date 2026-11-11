@@ -8,9 +8,9 @@ RC = os.environ.get("RUBIKA_CHAT", "")
 tg = f"https://api.telegram.org/bot{TG}"
 bale = f"https://tapi.bale.ai/bot{BT}"
 rub = f"https://botapi.rubika.ir/v3/{RT}"
-MAX_WAIT = 900  # حداکثر صبر (ثانیه) برای ویرایش پست‌یار
+MAX_WAIT = 900  # حداکثر صبر برای ویرایش پست‌یار (عکس و ویدیو)
+SETTLE = 60     # صبر برای کامل شدن آلبوم‌های بدون ویرایش
 
-# جایگزینی آیدی‌ها: سمت چپ آیدی تلگرام، سمت راست آیدی همون پیام‌رسان
 RUBIKA_REPLACE = {
     "@vahid_abasiii": "@vahiid_abasii",
     "@iman_tavakoli": "@iman_tavakolii",
@@ -52,6 +52,27 @@ def bale_send(key, method, text, name, data, reply):
         raise Exception(j)
     return j["result"]["message_id"]
 
+def bale_album(items, caption, reply):
+    media, files = [], {}
+    for i, (p, d) in enumerate(items):
+        key, method, rtype, name, data = d
+        att = f"f{i}"
+        m = {"type": "photo" if key == "photo" else "video",
+             "media": f"attach://{att}"}
+        if i == 0 and caption:
+            m["caption"] = caption
+        media.append(m)
+        files[att] = (name, data)
+    payload = {"chat_id": BC, "media": json.dumps(media)}
+    if reply:
+        payload["reply_to_message_id"] = reply
+    r = requests.post(f"{bale}/sendMediaGroup", data=payload, files=files)
+    print("bale album", r.status_code, r.text[:150])
+    j = r.json()
+    if not j.get("ok"):
+        raise Exception(j)
+    return [m["message_id"] for m in j["result"]]
+
 def rubika_send(rtype, text, name, data, reply):
     if not (RT and RC):
         return None
@@ -89,11 +110,7 @@ def run(fn, *a):
                 print(fn.__name__, "retry error:", e2)
     return None
 
-def handle(p):
-    text = p.get("text") or p.get("caption") or ""
-    rt = p.get("reply_to_message")
-    prev = MAP.get(str(rt["message_id"]), {}) if rt else {}
-    name = data = key = method = rtype = None
+def download(p):
     for k, m, t in KINDS:
         if k in p:
             obj = p[k][-1] if k == "photo" else p[k]
@@ -101,21 +118,78 @@ def handle(p):
                                 params={"file_id": obj["file_id"]}).json()
             if not info.get("ok"):
                 print("file error", info.get("description"))
-                return
+                return None
             path = info["result"]["file_path"]
             data = requests.get(
                 f"https://api.telegram.org/file/bot{TG}/{path}").content
-            name = os.path.basename(path)
-            key, method, rtype = k, m, t
-            break
-    if key is None and not p.get("text"):
-        print("unsupported type")
-        return
+            return k, m, t, os.path.basename(path), data
+    return None
+
+def handle(p):
+    text = p.get("text") or p.get("caption") or ""
+    rt = p.get("reply_to_message")
+    prev = MAP.get(str(rt["message_id"]), {}) if rt else {}
+    d = download(p)
+    if d is None:
+        if not p.get("text"):
+            print("unsupported or download failed")
+            return
+        key = method = rtype = name = data = None
+    else:
+        key, method, rtype, name, data = d
     b = run(bale_send, key, method, fix(text, BALE_REPLACE),
             name, data, prev.get("bale"))
     r = run(rubika_send, rtype, fix(text, RUBIKA_REPLACE),
             name, data, prev.get("rubika"))
     MAP[str(p["message_id"])] = {"bale": b, "rubika": r}
+
+def handle_group(posts):
+    posts = sorted(posts, key=lambda x: x["message_id"])
+    caption = ""
+    for p in posts:
+        if p.get("caption"):
+            caption = p["caption"]
+    rt = next((p["reply_to_message"] for p in posts
+               if p.get("reply_to_message")), None)
+    prev = MAP.get(str(rt["message_id"]), {}) if rt else {}
+    items = []
+    for p in posts:
+        d = download(p)
+        if d:
+            items.append((p, d))
+    if not items:
+        print("group: nothing to send")
+        return
+    n = len(items)
+    bale_ids = [None] * n
+    rubika_ids = [None] * n
+
+    cap_b = fix(caption, BALE_REPLACE)
+    done = False
+    if n >= 2 and all(d[0] in ("photo", "video") for _, d in items):
+        try:
+            ids = bale_album(items, cap_b, prev.get("bale"))
+            bale_ids = (ids + [None] * n)[:n]
+            done = True
+        except Exception as e:
+            print("bale album failed, sending one by one:", e)
+    if not done:
+        for i, (p, d) in enumerate(items):
+            key, method, rtype, name, data = d
+            text = cap_b if i == n - 1 else ""
+            bale_ids[i] = run(bale_send, key, method, text, name, data,
+                              prev.get("bale") if i == 0 else None)
+
+    cap_r = fix(caption, RUBIKA_REPLACE)
+    for i, (p, d) in enumerate(items):
+        key, method, rtype, name, data = d
+        text = cap_r if i == n - 1 else ""
+        rubika_ids[i] = run(rubika_send, rtype, text, name, data,
+                            prev.get("rubika") if i == 0 else None)
+
+    for i, (p, d) in enumerate(items):
+        MAP[str(p["message_id"])] = {"bale": bale_ids[i],
+                                     "rubika": rubika_ids[i]}
 
 def needs_edit(p):
     return bool(p.get("photo") or p.get("video"))
@@ -142,15 +216,36 @@ for u in ups:
         edited.add(mid)
     first_uid.setdefault(mid, u["update_id"])
 
+groups, singles = {}, []
+for mid, p in latest.items():
+    gid = p.get("media_group_id")
+    if gid:
+        groups.setdefault(gid, []).append(p)
+    else:
+        singles.append((mid, p))
+
 now = time.time()
 pending = []
-for mid, p in latest.items():
+
+for mid, p in singles:
     if mid in MAP:
         continue
     if mid not in edited and needs_edit(p) and now - p["date"] < MAX_WAIT:
         pending.append(first_uid[mid])
         continue
     handle(p)
+
+for gid, posts in groups.items():
+    mids = [str(p["message_id"]) for p in posts]
+    if all(m in MAP for m in mids):
+        continue
+    newest = max(p["date"] for p in posts)
+    if not any(m in edited for m in mids):
+        wait = MAX_WAIT if any(needs_edit(p) for p in posts) else SETTLE
+        if now - newest < wait:
+            pending.extend(first_uid[m] for m in mids)
+            continue
+    handle_group([p for p in posts if str(p["message_id"]) not in MAP])
 
 if ups:
     offset = min(pending) if pending else ups[-1]["update_id"] + 1
