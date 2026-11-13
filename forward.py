@@ -1,4 +1,18 @@
 import os, json, time, requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# تلاش مجدد برای قطعی‌های لحظه‌ای هنگام گرفتن پست‌ها و فایل‌ها
+S = requests.Session()
+S.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=5, backoff_factor=2, status_forcelist=[502, 503, 504])))
+_get = S.get
+
+def rget(url, **kw):
+    kw.setdefault("timeout", 60)
+    return _get(url, **kw)
+
+requests.get = rget
 
 TG = os.environ["TG_TOKEN"]
 BT = os.environ["BALE_TOKEN"]
@@ -8,9 +22,10 @@ RC = os.environ.get("RUBIKA_CHAT", "")
 tg = f"https://api.telegram.org/bot{TG}"
 bale = f"https://tapi.bale.ai/bot{BT}"
 rub = f"https://botapi.rubika.ir/v3/{RT}"
-MAX_WAIT = 900  # حداکثر صبر برای ویرایش پست‌یار (عکس و ویدیو)
+MAX_WAIT = 900  # حداکثر صبر (ثانیه) برای ویرایش پست‌یار (عکس و ویدیو)
 SETTLE = 60     # صبر برای کامل شدن آلبوم‌های بدون ویرایش
 
+# جایگزینی آیدی‌ها: سمت چپ آیدی تلگرام، سمت راست آیدی همون پیام‌رسان
 RUBIKA_REPLACE = {
     "@vahid_abasiii": "@vahiid_abasii",
     "@iman_tavakoli": "@iman_tavakolii",
@@ -36,21 +51,30 @@ except Exception:
     MAP = {}
 
 def bale_send(key, method, text, name, data, reply):
-    payload = {"chat_id": BC}
-    if reply:
-        payload["reply_to_message_id"] = reply
-    if key is None:
-        payload["text"] = text
-        r = requests.post(f"{bale}/sendMessage", json=payload)
-    else:
-        payload["caption"] = text
-        r = requests.post(f"{bale}/{method}", data=payload,
-                          files={key: (name, data)})
-    print("bale", r.status_code, r.text[:150])
-    j = r.json()
-    if not j.get("ok"):
-        raise Exception(j)
-    return j["result"]["message_id"]
+    last = None
+    for attempt in range(3):
+        payload = {"chat_id": BC}
+        if reply:
+            payload["reply_to_message_id"] = reply
+        try:
+            if key is None:
+                payload["text"] = text
+                r = requests.post(f"{bale}/sendMessage", json=payload,
+                                  timeout=120)
+            else:
+                payload["caption"] = text
+                r = requests.post(f"{bale}/{method}", data=payload,
+                                  files={key: (name, data)}, timeout=120)
+            print("bale", r.status_code, r.text[:300])
+            j = r.json()
+            if j.get("ok"):
+                return j["result"]["message_id"]
+            last = j
+        except Exception as e:
+            print("bale exception:", e)
+            last = e
+        time.sleep(3 * (attempt + 1))
+    raise Exception(last)
 
 def bale_album(items, caption, reply):
     media, files = [], {}
@@ -66,8 +90,9 @@ def bale_album(items, caption, reply):
     payload = {"chat_id": BC, "media": json.dumps(media)}
     if reply:
         payload["reply_to_message_id"] = reply
-    r = requests.post(f"{bale}/sendMediaGroup", data=payload, files=files)
-    print("bale album", r.status_code, r.text[:150])
+    r = requests.post(f"{bale}/sendMediaGroup", data=payload, files=files,
+                      timeout=180)
+    print("bale album", r.status_code, r.text[:300])
     j = r.json()
     if not j.get("ok"):
         raise Exception(j)
@@ -80,17 +105,17 @@ def rubika_send(rtype, text, name, data, reply):
         body = {"chat_id": RC, "text": text}
         if reply:
             body["reply_to_message_id"] = reply
-        r = requests.post(f"{rub}/sendMessage", json=body)
+        r = requests.post(f"{rub}/sendMessage", json=body, timeout=120)
     else:
         u = requests.post(f"{rub}/requestSendFile",
-                          json={"type": rtype}).json()
+                          json={"type": rtype}, timeout=60).json()
         up = requests.post(u["data"]["upload_url"],
-                           files={"file": (name, data)}).json()
+                           files={"file": (name, data)}, timeout=180).json()
         body = {"chat_id": RC, "file_id": up["data"]["file_id"],
                 "text": text}
         if reply:
             body["reply_to_message_id"] = reply
-        r = requests.post(f"{rub}/sendFile", json=body)
+        r = requests.post(f"{rub}/sendFile", json=body, timeout=120)
     print("rubika", r.status_code, r.text[:200])
     j = r.json()
     if j.get("status") != "OK":
@@ -193,13 +218,6 @@ def handle_group(posts):
 
 def needs_edit(p):
     return bool(p.get("photo") or p.get("video"))
-
-if RT and not RC:
-    try:
-        print("RUBIKA UPDATES:",
-              requests.post(f"{rub}/getUpdates", json={"limit": 20}).text)
-    except Exception as e:
-        print("rubika updates error:", e)
 
 allowed = '["channel_post","edited_channel_post"]'
 ups = requests.get(f"{tg}/getUpdates",
