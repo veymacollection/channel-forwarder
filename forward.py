@@ -101,26 +101,36 @@ def bale_album(items, caption, reply):
 def rubika_send(rtype, text, name, data, reply):
     if not (RT and RC):
         return None
-    if rtype is None:
-        body = {"chat_id": RC, "text": text}
-        if reply:
-            body["reply_to_message_id"] = reply
-        r = requests.post(f"{rub}/sendMessage", json=body, timeout=120)
-    else:
-        u = requests.post(f"{rub}/requestSendFile",
-                          json={"type": rtype}, timeout=60).json()
-        up = requests.post(u["data"]["upload_url"],
-                           files={"file": (name, data)}, timeout=180).json()
-        body = {"chat_id": RC, "file_id": up["data"]["file_id"],
-                "text": text}
-        if reply:
-            body["reply_to_message_id"] = reply
-        r = requests.post(f"{rub}/sendFile", json=body, timeout=120)
-    print("rubika", r.status_code, r.text[:200])
-    j = r.json()
-    if j.get("status") != "OK":
-        raise Exception(j)
-    return j["data"].get("message_id")
+    last = None
+    for attempt in range(3):
+        try:
+            if rtype is None:
+                body = {"chat_id": RC, "text": text}
+                if reply:
+                    body["reply_to_message_id"] = reply
+                r = requests.post(f"{rub}/sendMessage", json=body,
+                                  timeout=120)
+            else:
+                u = requests.post(f"{rub}/requestSendFile",
+                                  json={"type": rtype}, timeout=60).json()
+                up = requests.post(u["data"]["upload_url"],
+                                   files={"file": (name, data)},
+                                   timeout=300).json()
+                body = {"chat_id": RC, "file_id": up["data"]["file_id"],
+                        "text": text}
+                if reply:
+                    body["reply_to_message_id"] = reply
+                r = requests.post(f"{rub}/sendFile", json=body, timeout=120)
+            print("rubika", r.status_code, r.text[:200])
+            j = r.json()
+            if j.get("status") == "OK":
+                return j["data"].get("message_id")
+            last = j
+        except Exception as e:
+            print("rubika exception:", e)
+            last = e
+        time.sleep(3 * (attempt + 1))
+    raise Exception(last)
 
 def run(fn, *a):
     reply = a[-1]
