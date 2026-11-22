@@ -16,22 +16,30 @@ requests.get = rget
 
 TG = os.environ["TG_TOKEN"]
 BT = os.environ["BALE_TOKEN"]
-BC = os.environ["BALE_CHAT"]
 RT = os.environ.get("RUBIKA_TOKEN", "")
-RC = os.environ.get("RUBIKA_CHAT", "")
 tg = f"https://api.telegram.org/bot{TG}"
 bale = f"https://tapi.bale.ai/bot{BT}"
 rub = f"https://botapi.rubika.ir/v3/{RT}"
-MAX_WAIT = 900  # حداکثر صبر (ثانیه) برای ویرایش پست‌یار (عکس و ویدیو)
+MAX_WAIT = 900  # حداکثر صبر برای ویرایش پست‌یار (عکس و ویدیو)
 SETTLE = 60     # صبر برای کامل شدن آلبوم‌های بدون ویرایش
 
-# جایگزینی آیدی‌ها: سمت چپ آیدی تلگرام، سمت راست آیدی همون پیام‌رسان
-RUBIKA_REPLACE = {
-    "@vahid_abasiii": "@vahiid_abasii",
-    "@iman_tavakoli": "@iman_tavakolii",
-}
-BALE_REPLACE = {
-    "@iman_tavakoli": "@iman_tavakolii",
+# مسیر هر کانال تلگرام (آیدی کانال تلگرام با حروف کوچک)
+ROUTES = {
+    "veyma_collection": {
+        "prefix": "",
+        "bale": os.environ["BALE_CHAT"],
+        "rubika": os.environ.get("RUBIKA_CHAT", ""),
+        "bale_fix": {"@iman_tavakoli": "@iman_tavakolii"},
+        "rubika_fix": {"@vahid_abasiii": "@vahiid_abasii",
+                       "@iman_tavakoli": "@iman_tavakolii"},
+    },
+    "poshakatara": {
+        "prefix": "poshakatara:",
+        "bale": "@PoshakATARA",
+        "rubika": "",
+        "bale_fix": {"@FarshidAbasi": "@Farshid_Abbasi_1990"},
+        "rubika_fix": {},
+    },
 }
 
 def fix(t, table):
@@ -50,10 +58,18 @@ try:
 except Exception:
     MAP = {}
 
-def bale_send(key, method, text, name, data, reply):
+def mk(route, p):
+    return route["prefix"] + str(p["message_id"])
+
+def route_of(p):
+    c = p["chat"]
+    return (ROUTES.get((c.get("username") or "").lower())
+            or ROUTES.get(str(c["id"])))
+
+def bale_send(chat, key, method, text, name, data, reply):
     last = None
     for attempt in range(3):
-        payload = {"chat_id": BC}
+        payload = {"chat_id": chat}
         if reply:
             payload["reply_to_message_id"] = reply
         try:
@@ -65,7 +81,7 @@ def bale_send(key, method, text, name, data, reply):
                 payload["caption"] = text
                 r = requests.post(f"{bale}/{method}", data=payload,
                                   files={key: (name, data)}, timeout=120)
-            print("bale", r.status_code, r.text[:300])
+            print("bale", chat, r.status_code, r.text[:300])
             j = r.json()
             if j.get("ok"):
                 return j["result"]["message_id"]
@@ -76,7 +92,7 @@ def bale_send(key, method, text, name, data, reply):
         time.sleep(3 * (attempt + 1))
     raise Exception(last)
 
-def bale_album(items, caption, reply):
+def bale_album(chat, items, caption, reply):
     media, files = [], {}
     for i, (p, d) in enumerate(items):
         key, method, rtype, name, data = d
@@ -87,25 +103,25 @@ def bale_album(items, caption, reply):
             m["caption"] = caption
         media.append(m)
         files[att] = (name, data)
-    payload = {"chat_id": BC, "media": json.dumps(media)}
+    payload = {"chat_id": chat, "media": json.dumps(media)}
     if reply:
         payload["reply_to_message_id"] = reply
     r = requests.post(f"{bale}/sendMediaGroup", data=payload, files=files,
                       timeout=180)
-    print("bale album", r.status_code, r.text[:300])
+    print("bale album", chat, r.status_code, r.text[:300])
     j = r.json()
     if not j.get("ok"):
         raise Exception(j)
     return [m["message_id"] for m in j["result"]]
 
-def rubika_send(rtype, text, name, data, reply):
-    if not (RT and RC):
+def rubika_send(chat, rtype, text, name, data, reply):
+    if not (RT and chat):
         return None
     last = None
     for attempt in range(3):
         try:
             if rtype is None:
-                body = {"chat_id": RC, "text": text}
+                body = {"chat_id": chat, "text": text}
                 if reply:
                     body["reply_to_message_id"] = reply
                 r = requests.post(f"{rub}/sendMessage", json=body,
@@ -116,7 +132,7 @@ def rubika_send(rtype, text, name, data, reply):
                 up = requests.post(u["data"]["upload_url"],
                                    files={"file": (name, data)},
                                    timeout=300).json()
-                body = {"chat_id": RC, "file_id": up["data"]["file_id"],
+                body = {"chat_id": chat, "file_id": up["data"]["file_id"],
                         "text": text}
                 if reply:
                     body["reply_to_message_id"] = reply
@@ -160,10 +176,10 @@ def download(p):
             return k, m, t, os.path.basename(path), data
     return None
 
-def handle(p):
+def handle(p, route):
     text = p.get("text") or p.get("caption") or ""
     rt = p.get("reply_to_message")
-    prev = MAP.get(str(rt["message_id"]), {}) if rt else {}
+    prev = MAP.get(route["prefix"] + str(rt["message_id"]), {}) if rt else {}
     d = download(p)
     if d is None:
         if not p.get("text"):
@@ -172,13 +188,13 @@ def handle(p):
         key = method = rtype = name = data = None
     else:
         key, method, rtype, name, data = d
-    b = run(bale_send, key, method, fix(text, BALE_REPLACE),
-            name, data, prev.get("bale"))
-    r = run(rubika_send, rtype, fix(text, RUBIKA_REPLACE),
-            name, data, prev.get("rubika"))
-    MAP[str(p["message_id"])] = {"bale": b, "rubika": r}
+    b = run(bale_send, route["bale"], key, method,
+            fix(text, route["bale_fix"]), name, data, prev.get("bale"))
+    r = run(rubika_send, route["rubika"], rtype,
+            fix(text, route["rubika_fix"]), name, data, prev.get("rubika"))
+    MAP[mk(route, p)] = {"bale": b, "rubika": r}
 
-def handle_group(posts):
+def handle_group(posts, route):
     posts = sorted(posts, key=lambda x: x["message_id"])
     caption = ""
     for p in posts:
@@ -186,7 +202,7 @@ def handle_group(posts):
             caption = p["caption"]
     rt = next((p["reply_to_message"] for p in posts
                if p.get("reply_to_message")), None)
-    prev = MAP.get(str(rt["message_id"]), {}) if rt else {}
+    prev = MAP.get(route["prefix"] + str(rt["message_id"]), {}) if rt else {}
     items = []
     for p in posts:
         d = download(p)
@@ -199,11 +215,11 @@ def handle_group(posts):
     bale_ids = [None] * n
     rubika_ids = [None] * n
 
-    cap_b = fix(caption, BALE_REPLACE)
+    cap_b = fix(caption, route["bale_fix"])
     done = False
     if n >= 2 and all(d[0] in ("photo", "video") for _, d in items):
         try:
-            ids = bale_album(items, cap_b, prev.get("bale"))
+            ids = bale_album(route["bale"], items, cap_b, prev.get("bale"))
             bale_ids = (ids + [None] * n)[:n]
             done = True
         except Exception as e:
@@ -212,19 +228,20 @@ def handle_group(posts):
         for i, (p, d) in enumerate(items):
             key, method, rtype, name, data = d
             text = cap_b if i == n - 1 else ""
-            bale_ids[i] = run(bale_send, key, method, text, name, data,
+            bale_ids[i] = run(bale_send, route["bale"], key, method, text,
+                              name, data,
                               prev.get("bale") if i == 0 else None)
 
-    cap_r = fix(caption, RUBIKA_REPLACE)
+    cap_r = fix(caption, route["rubika_fix"])
     for i, (p, d) in enumerate(items):
         key, method, rtype, name, data = d
         text = cap_r if i == n - 1 else ""
-        rubika_ids[i] = run(rubika_send, rtype, text, name, data,
+        rubika_ids[i] = run(rubika_send, route["rubika"], rtype, text,
+                            name, data,
                             prev.get("rubika") if i == 0 else None)
 
     for i, (p, d) in enumerate(items):
-        MAP[str(p["message_id"])] = {"bale": bale_ids[i],
-                                     "rubika": rubika_ids[i]}
+        MAP[mk(route, p)] = {"bale": bale_ids[i], "rubika": rubika_ids[i]}
 
 def needs_edit(p):
     return bool(p.get("photo") or p.get("video"))
@@ -238,42 +255,46 @@ for u in ups:
     p = u.get("channel_post") or u.get("edited_channel_post")
     if not p:
         continue
-    mid = str(p["message_id"])
-    latest[mid] = p
+    uid = f"{p['chat']['id']}:{p['message_id']}"
+    latest[uid] = p
     if u.get("edited_channel_post"):
-        edited.add(mid)
-    first_uid.setdefault(mid, u["update_id"])
+        edited.add(uid)
+    first_uid.setdefault(uid, u["update_id"])
 
 groups, singles = {}, []
-for mid, p in latest.items():
+for uid, p in latest.items():
+    if route_of(p) is None:
+        continue
     gid = p.get("media_group_id")
     if gid:
-        groups.setdefault(gid, []).append(p)
+        groups.setdefault((p["chat"]["id"], gid), []).append(p)
     else:
-        singles.append((mid, p))
+        singles.append((uid, p))
 
 now = time.time()
 pending = []
 
-for mid, p in singles:
-    if mid in MAP:
+for uid, p in singles:
+    route = route_of(p)
+    if mk(route, p) in MAP:
         continue
-    if mid not in edited and needs_edit(p) and now - p["date"] < MAX_WAIT:
-        pending.append(first_uid[mid])
+    if uid not in edited and needs_edit(p) and now - p["date"] < MAX_WAIT:
+        pending.append(first_uid[uid])
         continue
-    handle(p)
+    handle(p, route)
 
-for gid, posts in groups.items():
-    mids = [str(p["message_id"]) for p in posts]
-    if all(m in MAP for m in mids):
+for (cid, gid), posts in groups.items():
+    route = route_of(posts[0])
+    uids = [f"{cid}:{p['message_id']}" for p in posts]
+    if all(mk(route, p) in MAP for p in posts):
         continue
     newest = max(p["date"] for p in posts)
-    if not any(m in edited for m in mids):
+    if not any(u in edited for u in uids):
         wait = MAX_WAIT if any(needs_edit(p) for p in posts) else SETTLE
         if now - newest < wait:
-            pending.extend(first_uid[m] for m in mids)
+            pending.extend(first_uid[u] for u in uids)
             continue
-    handle_group([p for p in posts if str(p["message_id"]) not in MAP])
+    handle_group([p for p in posts if mk(route, p) not in MAP], route)
 
 if ups:
     offset = min(pending) if pending else ups[-1]["update_id"] + 1
